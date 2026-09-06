@@ -29,7 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-ccfraud-train = "ccfraud.__main__:main"
+ccfraud-train = "ccfraud.train:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -86,17 +86,29 @@ def pick_threshold(
     """Lowest threshold whose precision is >= ``min_precision``.
 
     "Lowest" maximises recall among the points that clear the precision bar.
-    If no threshold reaches ``min_precision`` (rare, small validation folds),
-    fall back to the threshold at maximum precision.
+    If no threshold reaches ``min_precision`` (the target is simply not
+    achievable on this data), fall back to the threshold with the best F1 so
+    the model still predicts something useful.
     """
-    precision, _recall, thresholds = precision_recall_curve(y_true, proba)
+    precision, recall, thresholds = precision_recall_curve(y_true, proba)
     # precision_recall_curve returns len(thresholds) == len(precision) - 1;
-    # align by dropping the final precision point (recall == 0).
+    # align by dropping the final point (recall == 0, precision == 1 by fiat).
     precision = precision[:-1]
+    recall = recall[:-1]
+    if thresholds.size == 0:
+        return 0.5
+
     ok = np.where(precision >= min_precision)[0]
-    if ok.size == 0:
-        return float(thresholds[int(np.argmax(precision))])
-    return float(thresholds[ok[0]])
+    if ok.size:
+        return float(thresholds[ok[0]])
+
+    f1 = np.divide(
+        2 * precision * recall,
+        precision + recall,
+        out=np.zeros_like(precision),
+        where=(precision + recall) > 0,
+    )
+    return float(thresholds[int(np.argmax(f1))])
 
 
 def evaluate(

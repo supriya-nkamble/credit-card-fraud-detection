@@ -8,7 +8,7 @@ env/
 data/
 
 # Model artifacts and run outputs
-output/
+output*/
 *.pkl
 *.joblib
 *.cbm
