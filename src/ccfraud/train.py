@@ -72,7 +72,8 @@ def _base_pipeline(best, seed: int):
 def run(config: Config, fast: bool) -> dict:
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.linear_model import LogisticRegression
-    from sklearn.model_selection import StratifiedKFold, train_test_split
+    from sklearn.metrics import brier_score_loss
+    from sklearn.model_selection import StratifiedKFold, cross_val_predict
 
     from ccfraud.pipeline import build_pipeline
     from ccfraud.select import select_model
@@ -114,21 +115,28 @@ def run(config: Config, fast: bool) -> dict:
     )
     cv = StratifiedKFold(n_splits=config.cv_folds, shuffle=True, random_state=config.seed)
 
-    # --- pick the threshold on calibrated probabilities the model has NOT seen ---
-    # Split the training set: fit+calibrate on one part, choose the operating
-    # threshold on the other. A threshold picked on uncalibrated scores would not
-    # transfer to the calibrated model.
-    X_fit, X_thr, y_fit, y_thr = train_test_split(
-        X_train, y_train, test_size=0.25, random_state=config.seed, stratify=y_train
+    # --- choose the operating threshold on out-of-fold probabilities ---
+    # cross_val_predict gives every training row a prediction from a fold that
+    # did not see it, so the PR curve here is honest and uses all ~390 positives
+    # (a single hold-out slice would have far fewer). Isotonic calibration is
+    # monotonic, so a threshold picked on the base scores transfers to the
+    # calibrated model as the same operating point.
+    oof_proba = cross_val_predict(
+        _base_pipeline(best, config.seed), X_train, y_train, cv=cv, method="predict_proba"
+    )[:, 1]
+    threshold = pick_threshold(y_train, oof_proba, config.min_precision)
+    oof_precision_at_threshold = float(
+        ((oof_proba >= threshold) & (y_train == 1)).sum()
+        / max((oof_proba >= threshold).sum(), 1)
     )
-    cal_for_thr = CalibratedClassifierCV(
-        _base_pipeline(best, config.seed), method="isotonic", cv=cv
-    )
-    cal_for_thr.fit(X_fit, y_fit)
-    thr_proba = cal_for_thr.predict_proba(X_thr)[:, 1]
-    threshold = pick_threshold(y_thr, thr_proba, config.min_precision)
 
-    # --- refit the calibrated winner on the full training set, score on test ---
+    # --- refit on the full training set: uncalibrated (operating point) + calibrated ---
+    base_pipe = _base_pipeline(best, config.seed)
+    base_pipe.fit(X_train, y_train)
+    reports["selected"] = evaluate(
+        base_pipe, X_test, y_test, threshold=threshold, cost_matrix=cost
+    )
+
     final = CalibratedClassifierCV(
         _base_pipeline(best, config.seed), method="isotonic", cv=cv
     )
@@ -136,12 +144,7 @@ def run(config: Config, fast: bool) -> dict:
     reports["selected_calibrated"] = evaluate(
         final, X_test, y_test, threshold=threshold, cost_matrix=cost
     )
-
-    base_pipe = _base_pipeline(best, config.seed)
-    base_pipe.fit(X_train, y_train)
-    reports["selected_uncalibrated"] = evaluate(
-        base_pipe, X_test, y_test, threshold=0.5, cost_matrix=cost
-    )
+    brier = float(brier_score_loss(y_test, final.predict_proba(X_test)[:, 1]))
 
     out = {
         "config": {
@@ -163,6 +166,10 @@ def run(config: Config, fast: bool) -> dict:
             "cv_pr_auc_std": best.pr_auc_std,
         },
         "threshold": threshold,
+        "min_precision_target": config.min_precision,
+        "min_precision_met": oof_precision_at_threshold >= config.min_precision,
+        "oof_precision_at_threshold": oof_precision_at_threshold,
+        "calibrated_brier_score": brier,
         "cv_ranking": [r.as_dict() for r in ranking],
         "reports": {k: v.as_dict() for k, v in reports.items()},
     }
@@ -213,16 +220,23 @@ def main(argv: list[str] | None = None) -> None:
     out = run(config, fast=args.fast)
 
     sel = out["selected"]
-    rep = out["reports"]["selected_calibrated"]
+    rep = out["reports"]["selected"]
     print(
         f"\nselected: {sel['name']} + {sel['strategy']}  "
         f"CV PR-AUC {sel['cv_pr_auc_mean']:.3f} +/- {sel['cv_pr_auc_std']:.3f}"
     )
-    print(f"threshold: {out['threshold']:.4f}")
+    met = "met" if out["min_precision_met"] else "NOT met"
+    print(
+        f"threshold: {out['threshold']:.4f}  "
+        f"(min-precision {out['min_precision_target']:.2f} {met}; "
+        f"out-of-fold precision here {out['oof_precision_at_threshold']:.3f})"
+    )
     print(
         f"held-out test  PR-AUC {rep['pr_auc']:.3f}  ROC-AUC {rep['roc_auc']:.3f}  "
-        f"precision {rep['precision']:.3f}  recall {rep['recall']:.3f}  F1 {rep['f1']:.3f}"
+        f"precision {rep['precision']:.3f}  recall {rep['recall']:.3f}  F1 {rep['f1']:.3f}  "
+        f"expected cost {rep['expected_cost']:.0f}"
     )
+    print(f"calibrated Brier score {out['calibrated_brier_score']:.5f}")
     print(f"wrote {args.output_dir / 'metrics.json'}")
 
 
