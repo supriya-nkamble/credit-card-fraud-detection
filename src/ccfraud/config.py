@@ -41,13 +41,20 @@ class Config:
     test_size: float = 0.2
     cv_folds: int = 5
 
+    # Model *selection* runs on a stratified subsample this large (all positives
+    # kept). The PR-AUC ranking is stable well below the full 227k rows, and the
+    # winner is still trained, calibrated, and evaluated on the full data.
+    select_sample: int = 80_000
+
     # Lowest precision the fraud class must reach at the chosen threshold.
     min_precision: float = 0.90
 
     cost_matrix: CostMatrix = field(default_factory=CostMatrix)
 
-    # Candidate imbalance strategies tried during model selection.
-    imbalance_strategies: tuple[str, ...] = ("none", "smote", "smotetomek", "class_weight")
+    # Imbalance strategies tried during model selection. "smotetomek" is
+    # supported by the pipeline but left out of the default sweep: on 200k+ rows
+    # its Tomek-link cleaning is very slow and rarely beats plain SMOTE.
+    imbalance_strategies: tuple[str, ...] = ("none", "smote", "class_weight")
 
 
 DEFAULT_CONFIG = Config()

@@ -35,7 +35,7 @@ ccfraud-train = "ccfraud.train:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 addopts = "-q"
 
@@ -43,6 +43,7 @@ addopts = "-q"
 line-length = 100
 target-version = "py311"
 src = ["src", "scripts", "tests"]
+extend-exclude = ["notebooks", "Credit-Card-Fraud-Detection", ".venv"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

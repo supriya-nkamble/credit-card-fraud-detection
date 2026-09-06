@@ -34,3 +34,6 @@ Credit-Card-Fraud-Detection/
 
 # OS cruft
 .DS_Store
+
+# Run logs
+*.log

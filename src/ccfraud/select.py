@@ -23,7 +23,7 @@ from sklearn.metrics import average_precision_score
 from sklearn.model_selection import StratifiedKFold
 
 from .config import Config
-from .pipeline import IMBALANCE_STRATEGIES, build_pipeline
+from .pipeline import build_pipeline
 
 
 def _make_xgb() -> Any:
@@ -61,7 +61,7 @@ def _make_lgbm() -> Any:
 CANDIDATES: dict[str, Callable[[], Any]] = {
     "logreg": lambda: LogisticRegression(max_iter=1000, n_jobs=-1),
     "random_forest": lambda: RandomForestClassifier(
-        n_estimators=300, n_jobs=-1, random_state=42
+        n_estimators=200, max_samples=0.5, n_jobs=-1, random_state=42
     ),
     "xgboost": _make_xgb,
     "lightgbm": _make_lgbm,
@@ -99,7 +99,9 @@ def _score_pair(
         pipe = build_pipeline(CANDIDATES[name](), strategy, seed=seed)
         pipe.fit(X[train_idx], y[train_idx])
         proba = pipe.predict_proba(X[val_idx])[:, 1]
-        scores.append(float(average_precision_score(y[val_idx], proba)))
+        ap = float(average_precision_score(y[val_idx], proba))
+        # a degenerate fold (e.g. constant scores) can yield NaN; treat as 0
+        scores.append(0.0 if np.isnan(ap) else ap)
     return FoldResult(
         name=name,
         strategy=strategy,
@@ -130,7 +132,7 @@ def select_model(
     """
     config = config or Config()
     names = names or list(CANDIDATES)
-    strategies = strategies or list(IMBALANCE_STRATEGIES)
+    strategies = strategies or list(config.imbalance_strategies)
 
     X = np.asarray(X)
     y = np.asarray(y).astype(int)

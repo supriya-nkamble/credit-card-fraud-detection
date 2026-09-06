@@ -98,16 +98,17 @@ def run(config: Config, fast: bool) -> dict:
     lr.fit(X_train, y_train)
     reports["baseline_logreg"] = evaluate(lr, X_test, y_test, threshold=0.5, cost_matrix=cost)
 
-    # --- model selection ---
+    # --- model selection (on a stratified subsample; winner refit on full data) ---
     if fast:
-        X_sel, y_sel = _subsample_majority(X_train, y_train, 15_000, config.seed)
+        keep_neg = 15_000
         names: list[str] | None = ["logreg", "lightgbm"]
         strategies: list[str] | None = ["none", "smote"]
     else:
-        X_sel, y_sel = X_train, y_train
+        keep_neg = max(config.select_sample - int(y_train.sum()), 1)
         names = None
         strategies = None
 
+    X_sel, y_sel = _subsample_majority(X_train, y_train, keep_neg, config.seed)
     best, ranking = select_model(
         X_sel, y_sel, config=config, names=names, strategies=strategies
     )
