@@ -1,0 +1,36 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data (download separately - see README)
+*.csv
+data/
+
+# Model artifacts and run outputs
+output/
+*.pkl
+*.joblib
+*.cbm
+*.bin
+catboost_info/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Legacy / nested repos kept on disk for reference only
+notebooks/legacy/
+Credit-Card-Fraud-Detection/
+
+# OS cruft
+.DS_Store
