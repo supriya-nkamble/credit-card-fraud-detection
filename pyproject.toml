@@ -44,7 +44,7 @@ addopts = "-q"
 line-length = 100
 target-version = "py311"
 src = ["src", "scripts", "tests"]
-extend-exclude = ["notebooks", "Credit-Card-Fraud-Detection", ".venv"]
+extend-exclude = ["notebooks", "Credit-Card-Fraud-Detection", ".venv", "kaggle"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
