@@ -53,8 +53,9 @@ pip install -e ".[dev]"
 pytest                       # ~20 s, no dataset needed (synthetic data)
 ruff check . && mypy src
 
-ccfraud-train                # full run: selection -> calibration -> test eval
-ccfraud-train --fast         # small grid + subsample, for a quick check
+ccfraud-train                    # full run: selection -> calibration -> test eval
+ccfraud-train --fast             # small grid + subsample, for a quick check
+ccfraud-train --tune --ensemble  # Optuna search + stacked ensemble (see below)
 ```
 
 `ccfraud-train` writes `output/metrics.json`, `output/pr_curve.png`, and
@@ -93,6 +94,31 @@ XGBoost is noise. Random forest and logistic regression trail
   precision, but at the same threshold it cuts recall to 68 %. Use the
   uncalibrated model for the yes/no decision and the calibrated probabilities
   when ranking or costing alerts.
+
+### Does a hyperparameter search or an ensemble help? No.
+
+`ccfraud-train --tune --ensemble` runs an Optuna TPE search (60 trials each over
+LightGBM and XGBoost hyperparameters + imbalance strategy) and a
+`StackingClassifier` of the two. Run on Kaggle;
+`results/tune_ensemble_metrics.json`:
+
+| Model | Test PR-AUC | ROC-AUC | Precision | Recall | F1 |
+|---|---|---|---|---|---|
+| Default LightGBM + SMOTE (above) | 0.880 | 0.981 | 0.932 | 0.837 | 0.882 |
+| **Tuned XGBoost** (60 trials) | **0.881** | 0.969 | 0.865 | 0.847 | 0.856 |
+| Tuned + isotonic-calibrated | 0.880 | 0.977 | 0.899 | 0.816 | 0.856 |
+| Stacked ensemble (tuned LGBM + XGB) | 0.824 | 0.974 | 0.865 | 0.847 | 0.856 |
+
+- **Tuning bought ~0.001 PR-AUC** — inside the noise band. The fixed
+  hyperparameters were already near-optimal; the CV PR-AUC even dipped slightly.
+- **The stack made it worse** (0.824). The two members' probability outputs are
+  highly correlated, and a linear meta-model over them produced a degenerate,
+  poorly-calibrated score.
+- This is the point: on the ULB dataset **~0.88 PR-AUC is a property of the 30
+  anonymised features, not of model effort**. Published "0.95+" results on this
+  dataset come from leakage — most often SMOTE applied *before* the train/test
+  split. Higher genuinely needs richer data (per-card velocity, merchant,
+  device, time-of-day) and a sequence or graph model.
 
 ### Limitations
 
