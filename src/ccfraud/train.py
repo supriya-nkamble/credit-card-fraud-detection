@@ -4,18 +4,21 @@ Steps
 -----
 1. Load the dataset and make a stratified train/test split.
 2. Score a most-frequent baseline and a logistic-regression baseline.
-3. Select the best (estimator, imbalance strategy) by mean CV PR-AUC.
-4. Choose the decision threshold from out-of-fold probabilities on the
-   training set so the fraud precision meets ``config.min_precision``.
+3. Pick the model:
+   * default        - select the best (estimator, imbalance strategy) by CV PR-AUC
+   * ``--tune``     - Optuna search over LightGBM and XGBoost, keep the better
+4. Choose the decision threshold from out-of-fold probabilities so the fraud
+   precision meets ``config.min_precision``.
 5. Calibrate the winner's probabilities (isotonic, internal CV).
-6. Evaluate on the held-out test set and write ``output/metrics.json``
-   plus precision-recall and ROC curve PNGs.
+6. Optionally (``--ensemble``) stack the gradient-boosted models.
+7. Evaluate on the held-out test set and write ``output/metrics.json`` + curves.
 
 Usage
 -----
-    ccfraud-train --help             # installed console script
-    python -m ccfraud.train          # full run
-    python scripts/train.py --fast   # small grid, subsampled; for a smoke test
+    ccfraud-train --help
+    python -m ccfraud.train                    # default selection
+    python -m ccfraud.train --tune --ensemble  # search + stack (slow)
+    python scripts/train.py --fast             # tiny smoke run
 """
 
 from __future__ import annotations
@@ -43,6 +46,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=DEFAULT_CONFIG.seed)
     p.add_argument("--cv-folds", type=int, default=DEFAULT_CONFIG.cv_folds)
     p.add_argument("--min-precision", type=float, default=DEFAULT_CONFIG.min_precision)
+    p.add_argument("--tune", action="store_true", help="Optuna search over LightGBM + XGBoost")
+    p.add_argument("--n-trials", type=int, default=30, help="Optuna trials per estimator")
+    p.add_argument("--ensemble", action="store_true", help="also fit a stacked ensemble")
     p.add_argument(
         "--fast",
         action="store_true",
@@ -61,22 +67,20 @@ def _subsample_majority(X, y, keep_negatives: int, seed: int):
     return X[keep], y[keep]
 
 
-def _base_pipeline(best, seed: int):
-    """Rebuild the fresh, unfitted pipeline for the winning (name, strategy)."""
-    from ccfraud.pipeline import build_pipeline
-    from ccfraud.select import CANDIDATES
-
-    return build_pipeline(CANDIDATES[best.name](), best.strategy, seed=seed)
-
-
-def run(config: Config, fast: bool) -> dict:
+def run(
+    config: Config,
+    fast: bool,
+    tune: bool = False,
+    n_trials: int = 30,
+    ensemble: bool = False,
+) -> dict:
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import brier_score_loss
     from sklearn.model_selection import StratifiedKFold, cross_val_predict
 
     from ccfraud.pipeline import build_pipeline
-    from ccfraud.select import select_model
+    from ccfraud.select import CANDIDATES, select_model
 
     df = load_creditcard(config.data_path)
     X_train_df, X_test_df, y_train_s, y_test_s = stratified_split(
@@ -99,7 +103,7 @@ def run(config: Config, fast: bool) -> dict:
     lr.fit(X_train, y_train)
     reports["baseline_logreg"] = evaluate(lr, X_test, y_test, threshold=0.5, cost_matrix=cost)
 
-    # --- model selection (on a stratified subsample; winner refit on full data) ---
+    # selection subsample (winner is refit on the full training set)
     if fast:
         keep_neg = 15_000
         names: list[str] | None = ["logreg", "lightgbm"]
@@ -108,21 +112,55 @@ def run(config: Config, fast: bool) -> dict:
         keep_neg = max(config.select_sample - int(y_train.sum()), 1)
         names = None
         strategies = None
-
     X_sel, y_sel = _subsample_majority(X_train, y_train, keep_neg, config.seed)
-    best, ranking = select_model(
-        X_sel, y_sel, config=config, names=names, strategies=strategies
-    )
-    cv = StratifiedKFold(n_splits=config.cv_folds, shuffle=True, random_state=config.seed)
 
-    # --- choose the operating threshold on out-of-fold probabilities ---
-    # cross_val_predict gives every training row a prediction from a fold that
-    # did not see it, so the PR curve here is honest and uses all ~390 positives
-    # (a single hold-out slice would have far fewer). Isotonic calibration is
-    # monotonic, so a threshold picked on the base scores transfers to the
-    # calibrated model as the same operating point.
+    cv = StratifiedKFold(n_splits=config.cv_folds, shuffle=True, random_state=config.seed)
+    tuned_section: dict | None = None
+    ensemble_members: list[tuple[str, dict, str]] = []
+
+    # --- choose the single model ---
+    if tune:
+        from ccfraud.tune import make_estimator
+        from ccfraud.tune import tune as run_tune
+
+        tune_names = ["lightgbm"] if fast else ["lightgbm", "xgboost"]
+        tuned = {n: run_tune(n, X_sel, y_sel, config=config, n_trials=n_trials) for n in tune_names}
+        best_tr = max(tuned.values(), key=lambda t: t.pr_auc_mean)
+        tuned_section = {n: t.as_dict() for n, t in tuned.items()}
+        selected_meta = {
+            "name": f"{best_tr.estimator} (tuned)",
+            "strategy": best_tr.strategy,
+            "cv_pr_auc_mean": best_tr.pr_auc_mean,
+            "cv_pr_auc_std": best_tr.pr_auc_std,
+        }
+
+        def make_base():
+            est = make_estimator(best_tr.estimator, best_tr.params, config.seed)
+            return build_pipeline(est, best_tr.strategy, seed=config.seed)
+
+        ensemble_members = [(t.estimator, t.params, t.strategy) for t in tuned.values()]
+        ranking_dump: list[dict] = []
+    else:
+        best, ranking = select_model(
+            X_sel, y_sel, config=config, names=names, strategies=strategies
+        )
+        selected_meta = {
+            "name": best.name,
+            "strategy": best.strategy,
+            "cv_pr_auc_mean": best.pr_auc_mean,
+            "cv_pr_auc_std": best.pr_auc_std,
+        }
+
+        def make_base():
+            return build_pipeline(CANDIDATES[best.name](), best.strategy, seed=config.seed)
+
+        gbm = [r for r in ranking if r.name in ("lightgbm", "xgboost")][:2]
+        ensemble_members = [(r.name, {}, r.strategy) for r in gbm]
+        ranking_dump = [r.as_dict() for r in ranking]
+
+    # --- operating threshold from out-of-fold probabilities on the training set ---
     oof_proba = cross_val_predict(
-        _base_pipeline(best, config.seed), X_train, y_train, cv=cv, method="predict_proba"
+        make_base(), X_train, y_train, cv=cv, method="predict_proba"
     )[:, 1]
     threshold = pick_threshold(y_train, oof_proba, config.min_precision)
     oof_precision_at_threshold = float(
@@ -131,20 +169,40 @@ def run(config: Config, fast: bool) -> dict:
     )
 
     # --- refit on the full training set: uncalibrated (operating point) + calibrated ---
-    base_pipe = _base_pipeline(best, config.seed)
+    base_pipe = make_base()
     base_pipe.fit(X_train, y_train)
-    reports["selected"] = evaluate(
-        base_pipe, X_test, y_test, threshold=threshold, cost_matrix=cost
-    )
+    reports["selected"] = evaluate(base_pipe, X_test, y_test, threshold=threshold, cost_matrix=cost)
 
-    final = CalibratedClassifierCV(
-        _base_pipeline(best, config.seed), method="isotonic", cv=cv
-    )
+    final = CalibratedClassifierCV(make_base(), method="isotonic", cv=cv)
     final.fit(X_train, y_train)
     reports["selected_calibrated"] = evaluate(
         final, X_test, y_test, threshold=threshold, cost_matrix=cost
     )
     brier = float(brier_score_loss(y_test, final.predict_proba(X_test)[:, 1]))
+    plot_model = final
+
+    # --- optional stacked ensemble ---
+    ensemble_section: dict | None = None
+    if ensemble and len(ensemble_members) >= 2:
+        from ccfraud.ensemble import build_stack
+        from ccfraud.tune import make_estimator
+
+        def _member_est(name: str, params: dict):
+            return make_estimator(name, params, config.seed) if params else CANDIDATES[name]()
+
+        members = [
+            (name, _member_est(name, params), strat)
+            for name, params, strat in ensemble_members
+        ]
+        stack = build_stack(members, seed=config.seed, cv_folds=config.cv_folds)
+        stack.fit(X_train, y_train)
+        stack_rep = evaluate(stack, X_test, y_test, threshold=threshold, cost_matrix=cost)
+        reports["ensemble"] = stack_rep
+        ensemble_section = {
+            "members": [f"{n}+{s}" for n, _p, s in ensemble_members],
+            "note": "PR-AUC / ROC-AUC are threshold-free; P/R/F1 are at the shared threshold",
+        }
+        plot_model = stack
 
     out = {
         "config": {
@@ -153,27 +211,27 @@ def run(config: Config, fast: bool) -> dict:
             "cv_folds": config.cv_folds,
             "min_precision": config.min_precision,
             "fast": fast,
+            "tune": tune,
+            "n_trials": n_trials if tune else None,
+            "ensemble": ensemble,
         },
         "prevalence": {
             "train_positive_rate": float(y_train.mean()),
             "test_positive_rate": float(y_test.mean()),
             "test_positive_count": int(y_test.sum()),
         },
-        "selected": {
-            "name": best.name,
-            "strategy": best.strategy,
-            "cv_pr_auc_mean": best.pr_auc_mean,
-            "cv_pr_auc_std": best.pr_auc_std,
-        },
+        "selected": selected_meta,
+        "tuned": tuned_section,
+        "ensemble": ensemble_section,
         "threshold": threshold,
         "min_precision_target": config.min_precision,
         "min_precision_met": oof_precision_at_threshold >= config.min_precision,
         "oof_precision_at_threshold": oof_precision_at_threshold,
         "calibrated_brier_score": brier,
-        "cv_ranking": [r.as_dict() for r in ranking],
+        "cv_ranking": ranking_dump,
         "reports": {k: v.as_dict() for k, v in reports.items()},
     }
-    _write_outputs(out, final, X_test, y_test, config.output_dir)
+    _write_outputs(out, plot_model, X_test, y_test, config.output_dir)
     return out
 
 
@@ -217,10 +275,15 @@ def main(argv: list[str] | None = None) -> None:
         cv_folds=args.cv_folds,
         min_precision=args.min_precision,
     )
-    out = run(config, fast=args.fast)
+    out = run(
+        config,
+        fast=args.fast,
+        tune=args.tune,
+        n_trials=args.n_trials,
+        ensemble=args.ensemble,
+    )
 
     sel = out["selected"]
-    rep = out["reports"]["selected"]
     print(
         f"\nselected: {sel['name']} + {sel['strategy']}  "
         f"CV PR-AUC {sel['cv_pr_auc_mean']:.3f} +/- {sel['cv_pr_auc_std']:.3f}"
@@ -231,11 +294,15 @@ def main(argv: list[str] | None = None) -> None:
         f"(min-precision {out['min_precision_target']:.2f} {met}; "
         f"out-of-fold precision here {out['oof_precision_at_threshold']:.3f})"
     )
-    print(
-        f"held-out test  PR-AUC {rep['pr_auc']:.3f}  ROC-AUC {rep['roc_auc']:.3f}  "
-        f"precision {rep['precision']:.3f}  recall {rep['recall']:.3f}  F1 {rep['f1']:.3f}  "
-        f"expected cost {rep['expected_cost']:.0f}"
-    )
+    for key in ("selected", "ensemble"):
+        rep = out["reports"].get(key)
+        if rep is None:
+            continue
+        print(
+            f"{key:>9}  test PR-AUC {rep['pr_auc']:.3f}  ROC-AUC {rep['roc_auc']:.3f}  "
+            f"P {rep['precision']:.3f}  R {rep['recall']:.3f}  F1 {rep['f1']:.3f}  "
+            f"cost {rep['expected_cost']:.0f}"
+        )
     print(f"calibrated Brier score {out['calibrated_brier_score']:.5f}")
     print(f"wrote {args.output_dir / 'metrics.json'}")
 

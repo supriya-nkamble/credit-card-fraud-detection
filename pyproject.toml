@@ -14,6 +14,7 @@ dependencies = [
     "imbalanced-learn>=0.12,<0.13",
     "xgboost>=2.0,<3",
     "lightgbm>=4.3,<5",
+    "optuna>=3.4",
     "pandas>=2.1,<2.3",
     "numpy>=1.26,<2.1",
     "scipy>=1.11",
