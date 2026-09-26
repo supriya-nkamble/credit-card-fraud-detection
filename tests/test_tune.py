@@ -8,7 +8,7 @@ import pytest
 
 from ccfraud.config import DEFAULT_CONFIG
 from ccfraud.data import split_xy
-from ccfraud.tune import TUNABLE, make_estimator, tune
+from ccfraud.tune import TUNABLE, make_estimator, to_spec, tune
 from tests._synthetic import make_creditcard_frame
 
 
@@ -42,3 +42,21 @@ def test_tune_rejects_unknown_estimator():
     X, y = split_xy(df)
     with pytest.raises(ValueError):
         tune("catboost", X.to_numpy(), y.to_numpy(), n_trials=1)
+
+
+def test_to_spec_builds_a_working_pipeline():
+    df = make_creditcard_frame(n=800, pos=45, seed=6)
+    X, y = split_xy(df)
+    config = replace(DEFAULT_CONFIG, cv_folds=3)
+
+    result = tune(
+        "lightgbm", X.to_numpy(), y.to_numpy(), config=config, n_trials=2, strategies=["none"]
+    )
+    spec = to_spec(result, seed=config.seed)
+    assert spec.name == "lightgbm (tuned)"
+
+    pipe = spec.build()
+    pipe.fit(X.to_numpy(), y.to_numpy())
+    proba = pipe.predict_proba(X.to_numpy())
+    assert proba.shape == (len(y), 2)
+    assert spec.build() is not pipe  # a fresh, unfitted pipeline each call

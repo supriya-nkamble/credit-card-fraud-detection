@@ -21,6 +21,7 @@ from sklearn.model_selection import StratifiedKFold
 
 from .config import Config
 from .pipeline import build_pipeline
+from .spec import ModelSpec
 
 TUNABLE = ("lightgbm", "xgboost")
 
@@ -95,6 +96,19 @@ def make_estimator(name: str, params: dict[str, Any], seed: int = 42) -> Any:
             **params,
         )
     raise ValueError(f"unknown estimator {name!r}; tunable: {TUNABLE}")
+
+
+def to_spec(result: TuneResult, seed: int) -> ModelSpec:
+    """Turn a tuning result into a buildable ``ModelSpec``."""
+    return ModelSpec(
+        name=f"{result.estimator} (tuned)",
+        strategy=result.strategy,
+        cv_pr_auc_mean=result.pr_auc_mean,
+        cv_pr_auc_std=result.pr_auc_std,
+        build=lambda: build_pipeline(
+            make_estimator(result.estimator, result.params, seed), result.strategy, seed=seed
+        ),
+    )
 
 
 def tune(

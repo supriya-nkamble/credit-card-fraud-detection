@@ -20,7 +20,8 @@ from sklearn.preprocessing import RobustScaler
 IMBALANCE_STRATEGIES = ("none", "smote", "smotetomek", "class_weight")
 
 
-def _supports_class_weight(estimator: Any) -> bool:
+def supports_class_weight(estimator: Any) -> bool:
+    """Whether ``estimator`` can be rebalanced without a resampler."""
     params = estimator.get_params()
     return "class_weight" in params or "scale_pos_weight" in params
 
@@ -64,7 +65,7 @@ def build_pipeline(
             # selection step passes the actual ratio via set_params, this is
             # only a safe non-1 default.
             est.set_params(scale_pos_weight=10.0)
-        elif not _supports_class_weight(est):
+        elif not supports_class_weight(est):
             raise ValueError(
                 f"{type(est).__name__} has no class_weight/scale_pos_weight; "
                 "use a resampling strategy instead"

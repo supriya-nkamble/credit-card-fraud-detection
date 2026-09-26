@@ -1,36 +1,32 @@
 """Stacked ensemble of the gradient-boosted candidates.
 
-Each member is a leakage-free ``build_pipeline`` (scale -> resample -> estimator);
-``StackingClassifier`` trains them, takes their out-of-fold probabilities as
-features, and fits a logistic-regression meta-model on top. Resampling still
-happens only on each member's internal training folds.
+Each member is a ``ModelSpec`` (see :mod:`ccfraud.spec`); ``spec.build()``
+already returns a leakage-free ``scale -> resample -> estimator`` pipeline, so
+this module only wires members into a ``StackingClassifier`` - it does not
+build pipelines itself. ``StackingClassifier`` trains the members, takes their
+out-of-fold probabilities as features, and fits a logistic-regression
+meta-model on top. Resampling still happens only on each member's internal
+training folds.
 
-On the ULB dataset stacking typically adds ~0.005-0.01 PR-AUC over the best
-single model - a real but small gain.
+On the ULB dataset stacking has not beaten the best single member (see the
+README) - it is here as a documented, measured experiment, not a claim.
 """
 
 from __future__ import annotations
-
-from typing import Any
 
 from sklearn.ensemble import StackingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
 
-from .pipeline import build_pipeline
-
-Member = tuple[str, Any, str]  # (name, unfitted estimator, imbalance_strategy)
+from .spec import ModelSpec
 
 
-def build_stack(members: list[Member], seed: int = 42, cv_folds: int = 5) -> StackingClassifier:
-    """Assemble a StackingClassifier from ``(name, estimator, strategy)`` members."""
+def build_stack(members: list[ModelSpec], seed: int = 42, cv_folds: int = 5) -> StackingClassifier:
+    """Assemble a StackingClassifier from two or more ``ModelSpec`` members."""
     if len(members) < 2:
         raise ValueError("a stack needs at least two members")
 
-    estimators = [
-        (name, build_pipeline(est, strategy, seed=seed))
-        for name, est, strategy in members
-    ]
+    estimators = [(m.name, m.build()) for m in members]
     return StackingClassifier(
         estimators=estimators,
         final_estimator=LogisticRegression(max_iter=1000, class_weight="balanced"),

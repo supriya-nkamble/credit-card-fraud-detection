@@ -23,7 +23,8 @@ from sklearn.metrics import average_precision_score
 from sklearn.model_selection import StratifiedKFold
 
 from .config import Config
-from .pipeline import build_pipeline
+from .pipeline import build_pipeline, supports_class_weight
+from .spec import ModelSpec
 
 
 def _make_xgb() -> Any:
@@ -112,11 +113,28 @@ def _score_pair(
 
 
 def _compatible(name: str, strategy: str) -> bool:
+    """Can ``name`` actually run under ``strategy``?
+
+    Only ``class_weight`` restricts anything: it needs the estimator to expose
+    ``class_weight`` or ``scale_pos_weight``. All four current CANDIDATES do,
+    but this checks the real capability instead of asserting it in a comment,
+    so a future candidate without either is skipped here instead of raising
+    inside ``build_pipeline``.
+    """
     if strategy != "class_weight":
         return True
-    # logreg / random_forest expose class_weight; xgboost exposes
-    # scale_pos_weight; lightgbm exposes class_weight -> all four are fine.
-    return True
+    return supports_class_weight(CANDIDATES[name]())
+
+
+def to_spec(result: FoldResult, seed: int) -> ModelSpec:
+    """Turn a scored candidate into a buildable ``ModelSpec``."""
+    return ModelSpec(
+        name=result.name,
+        strategy=result.strategy,
+        cv_pr_auc_mean=result.pr_auc_mean,
+        cv_pr_auc_std=result.pr_auc_std,
+        build=lambda: build_pipeline(CANDIDATES[result.name](), result.strategy, seed=seed),
+    )
 
 
 def select_model(

@@ -8,12 +8,24 @@ from lightgbm import LGBMClassifier
 from sklearn.linear_model import LogisticRegression
 
 from ccfraud.ensemble import build_stack
+from ccfraud.pipeline import build_pipeline
+from ccfraud.spec import ModelSpec
 from tests._synthetic import make_creditcard_frame
+
+
+def _spec(name: str, estimator, strategy: str) -> ModelSpec:
+    return ModelSpec(
+        name=name,
+        strategy=strategy,
+        cv_pr_auc_mean=0.0,
+        cv_pr_auc_std=0.0,
+        build=lambda: build_pipeline(estimator, strategy, seed=0),
+    )
 
 
 def test_build_stack_needs_two_members():
     with pytest.raises(ValueError):
-        build_stack([("lgbm", LGBMClassifier(), "none")])
+        build_stack([_spec("lgbm", LGBMClassifier(), "none")])
 
 
 def test_stack_fits_and_predicts_proba():
@@ -23,8 +35,8 @@ def test_stack_fits_and_predicts_proba():
 
     stack = build_stack(
         [
-            ("lgbm", LGBMClassifier(n_estimators=60, verbosity=-1), "smote"),
-            ("logreg", LogisticRegression(max_iter=500), "none"),
+            _spec("lgbm", LGBMClassifier(n_estimators=60, verbosity=-1), "smote"),
+            _spec("logreg", LogisticRegression(max_iter=500), "none"),
         ],
         seed=0,
         cv_folds=3,
